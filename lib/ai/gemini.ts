@@ -2,6 +2,7 @@ import { AIEditParams, AIProvider } from "./provider";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export class GeminiAIProvider implements AIProvider {
+    name = 'gemini-legacy';
     private genAI: GoogleGenerativeAI;
     private model: any;
 
@@ -15,7 +16,7 @@ export class GeminiAIProvider implements AIProvider {
         this.model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     }
 
-    async editImage(params: AIEditParams): Promise<Buffer> {
+    async editImage(params: AIEditParams): Promise<{ buffer: Buffer; seed?: number }> {
         // Construct the prompt with context
         const prompt = `
             You are an expert image editor. 
@@ -40,6 +41,6 @@ export class GeminiAIProvider implements AIProvider {
         console.log("Mocking response for now...");
 
         // Fallback: Just return the input image for now to prevent crashing
-        return params.image;
+        return { buffer: params.image, seed: 0 };
     }
 }

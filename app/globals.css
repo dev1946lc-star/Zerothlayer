@@ -58,7 +58,7 @@
     --secondary: #27272a;
     --secondary-foreground: #fafafa;
     --muted: #27272a;
-    --muted-foreground: #a1a1aa;
+    --muted-foreground: #d4d4d8;
     --accent: #27272a;
     --accent-foreground: #fafafa;
     --destructive: #7f1d1d;
@@ -66,6 +66,48 @@
     --border: #27272a;
     --input: #27272a;
     --ring: #d4d4d8;
+  }
+
+  /* Ensure glass surfaces actually switch in media-based dark mode. */
+  .glass {
+    background: rgba(9, 9, 11, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  /*
+   * Improve contrast for common muted zinc text tokens used throughout panels.
+   * This avoids near-invisible labels on dark zinc backgrounds.
+   */
+  .text-zinc-400 {
+    color: #d4d4d8;
+  }
+
+  .text-zinc-500 {
+    color: #e4e4e7;
+  }
+
+  .text-zinc-600 {
+    color: #f4f4f5;
+  }
+
+  .placeholder\:text-zinc-500::placeholder {
+    color: #cbd5e1;
+    opacity: 1;
+  }
+
+  /*
+   * Form controls in dark panels should not inherit low-contrast defaults.
+   */
+  input,
+  textarea,
+  select {
+    color: #f4f4f5;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #cbd5e1;
+    opacity: 1;
   }
 }
 
@@ -90,11 +132,6 @@ body {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.dark .glass {
-  background: rgba(9, 9, 11, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 /* Custom Scrollbar */

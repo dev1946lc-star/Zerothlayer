@@ -5,6 +5,7 @@
 export interface Action {
     execute(): void;
     undo(): void;
+    label?: string;
 }
 
 /**
@@ -94,6 +95,20 @@ export class HistoryManager {
         return {
             undoCount: this.undoStack.length,
             redoCount: this.redoStack.length,
+        };
+    }
+
+    getEntries(): { undo: string[]; redo: string[] } {
+        const toLabel = (action: Action) => {
+            const explicit = (action as any).label;
+            if (typeof explicit === 'string' && explicit.trim()) return explicit;
+            const ctor = (action as any)?.constructor?.name;
+            return typeof ctor === 'string' && ctor ? ctor : 'Action';
+        };
+
+        return {
+            undo: this.undoStack.map(toLabel),
+            redo: this.redoStack.map(toLabel)
         };
     }
 

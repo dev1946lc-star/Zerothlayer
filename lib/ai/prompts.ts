@@ -1,6 +1,8 @@
 import sharp from 'sharp';
+import fs from 'node:fs';
+import path from 'node:path';
 
-export const SYSTEM_INSTRUCTIONS = `
+const DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert photo editor AI integrated into a professional image editing application.
 
 CRITICAL RULES:
@@ -18,6 +20,29 @@ CRITICAL RULES:
 Your goal: Make the edit look like it was always part of the original image.
 `;
 
+let cachedSystemInstructions: string | null = null;
+
+export const getSystemInstructions = (): string => {
+    if (cachedSystemInstructions) return cachedSystemInstructions;
+
+    try {
+        const aiSpecPath = path.resolve(process.cwd(), 'AI.md');
+        const contents = fs.readFileSync(aiSpecPath, 'utf8');
+
+        // Use the first fenced block as canonical instructions from AI.md.
+        const match = contents.match(/```([\s\S]*?)```/);
+        if (match?.[1]?.trim()) {
+            cachedSystemInstructions = match[1].trim();
+            return cachedSystemInstructions;
+        }
+    } catch (error) {
+        console.warn('[PromptBuilder] Falling back to default system instructions:', error);
+    }
+
+    cachedSystemInstructions = DEFAULT_SYSTEM_INSTRUCTIONS.trim();
+    return cachedSystemInstructions;
+};
+
 export interface ImageContext {
     dominantColors: string;
     lighting: string;
@@ -28,7 +53,8 @@ export interface ImageContext {
 export interface TechnicalConstraints {
     width: number;
     height: number;
-    outputFormat: string;
+    outputFormat: 'png' | 'jpeg' | 'webp';
+    featherAmount?: number;
 }
 
 export class PromptBuilder {
@@ -69,8 +95,10 @@ export class PromptBuilder {
         context: ImageContext,
         constraints: TechnicalConstraints
     ): string {
+        const systemInstructions = getSystemInstructions();
+
         return `
-${SYSTEM_INSTRUCTIONS}
+${systemInstructions}
 
 ---
 
@@ -89,6 +117,7 @@ USER INSTRUCTION:
 
 TECHNICAL CONSTRAINTS:
 - Selection region: ${constraints.width}x${constraints.height}px
+- Feather amount: ${constraints.featherAmount ?? 0}px
 - Output format: ${constraints.outputFormat}
 
 ---

@@ -3,19 +3,39 @@ import { v4 as uuidv4 } from 'uuid';
 
 export interface Layer {
     id: string;
-    type: 'image';
+    type: 'image' | 'adjustment' | 'smart' | 'group' | 'text' | 'shape' | 'video' | 'threeD';
     name: string;
     visible: boolean;
     locked: boolean;
     opacity: number;
+    fillOpacity?: number;
     blendMode: string;
+    clippingMask?: boolean;
     canvasObjectId?: string;
     thumbnail?: string;
+    smartObject?: boolean;
+    linkedAsset?: boolean;
+    externalSrc?: string;
+    layerStyle?: {
+        dropShadow?: number;
+        stroke?: number;
+        glow?: number;
+        bevel?: number;
+    };
     mask?: {
         dataUrl: string; // White = visible, Black = hidden
         visible: boolean;
     };
     filters?: Record<string, number>; // e.g. { brightness: 0.1, contrast: -0.2 }
+
+    // AI Metadata
+    aiData?: {
+        prompt: string;
+        seed: number;
+        provider: string;
+        context: Record<string, any>;
+        originalMask?: string;
+    };
 }
 
 interface LayerState {
@@ -24,6 +44,7 @@ interface LayerState {
 
     // Actions
     addLayer: (layer: Omit<Layer, 'id' | 'visible' | 'locked' | 'opacity' | 'blendMode'>) => string;
+    insertLayer: (layer: Layer, index?: number) => void;
     removeLayer: (id: string) => void;
     updateLayer: (id: string, updates: Partial<Layer>) => void;
     setLayers: (layers: Layer[]) => void;
@@ -34,8 +55,8 @@ interface LayerState {
     setLayerMask: (layerId: string, maskDataUrl: string | null) => void;
     toggleLayerMask: (layerId: string) => void;
 
-    activeTool: 'move' | 'select' | 'crop';
-    setActiveTool: (tool: 'move' | 'select' | 'crop') => void;
+    activeTool: 'move' | 'select' | 'crop' | 'lasso' | 'semantic' | 'magic' | 'quick' | 'slice';
+    setActiveTool: (tool: 'move' | 'select' | 'crop' | 'lasso' | 'semantic' | 'magic' | 'quick' | 'slice') => void;
 
     maskPreviewMode: boolean;
     setMaskPreviewMode: (enabled: boolean) => void;
@@ -43,10 +64,37 @@ interface LayerState {
     // Adjustment Actions
     setLayerFilter: (layerId: string, filterName: string, value: number) => void;
     setLayerThumbnail: (layerId: string, thumbnailDataUrl: string) => void;
+
+    aiPromptDraft: string | null;
+    setAiPromptDraft: (prompt: string | null) => void;
 }
 
 export interface LayerFilter {
-    name: 'brightness' | 'contrast' | 'saturation' | 'vibrance' | 'hue' | 'blur' | 'noise' | 'pixelate' | 'sepia' | 'grayscale' | 'invert';
+    name:
+    | 'brightness'
+    | 'contrast'
+    | 'saturation'
+    | 'vibrance'
+    | 'hue'
+    | 'blur'
+    | 'noise'
+    | 'pixelate'
+    | 'sepia'
+    | 'grayscale'
+    | 'invert'
+    | 'curves'
+    | 'redBalance'
+    | 'greenBalance'
+    | 'blueBalance'
+    | 'levels'
+    | 'exposure'
+    | 'shadows'
+    | 'highlights'
+    | 'selectiveColor'
+    | 'gradientMap'
+    | 'photoFilter'
+    | 'channelMixer'
+    | 'lutPreset';
     value: number; // Normalized usually -1 to 1 or 0 to 1 depending on filter
 }
 
@@ -61,6 +109,7 @@ export const useLayerStore = create<LayerState>((set: any) => ({
             visible: true,
             locked: false,
             opacity: 1,
+            fillOpacity: 1,
             blendMode: 'normal',
             ...layerData,
         };
@@ -72,6 +121,36 @@ export const useLayerStore = create<LayerState>((set: any) => ({
 
         return newLayer.id;
     },
+
+    insertLayer: (layer: Layer, index = 0) =>
+        set((state: LayerState) => {
+            const existingIndex = state.layers.findIndex((l) => l.id === layer.id);
+            const sanitizedLayer: Layer = {
+                ...layer,
+                visible: layer.visible ?? true,
+                locked: layer.locked ?? false,
+                opacity: layer.opacity ?? 1,
+                fillOpacity: layer.fillOpacity ?? 1,
+                blendMode: layer.blendMode ?? 'normal'
+            };
+
+            if (existingIndex >= 0) {
+                const next = [...state.layers];
+                next.splice(existingIndex, 1);
+                next.splice(Math.max(0, Math.min(index, next.length)), 0, sanitizedLayer);
+                return {
+                    layers: next,
+                    activeLayerId: sanitizedLayer.id
+                };
+            }
+
+            const next = [...state.layers];
+            next.splice(Math.max(0, Math.min(index, next.length)), 0, sanitizedLayer);
+            return {
+                layers: next,
+                activeLayerId: sanitizedLayer.id
+            };
+        }),
 
     removeLayer: (id: string) =>
         set((state: LayerState) => {
@@ -140,7 +219,7 @@ export const useLayerStore = create<LayerState>((set: any) => ({
         })),
 
     activeTool: 'move',
-    setActiveTool: (tool: 'move' | 'select' | 'crop') => set({ activeTool: tool }),
+    setActiveTool: (tool: 'move' | 'select' | 'crop' | 'lasso' | 'semantic' | 'magic' | 'quick' | 'slice') => set({ activeTool: tool }),
 
     maskPreviewMode: false,
     setMaskPreviewMode: (enabled: boolean) => set({ maskPreviewMode: enabled }),
@@ -165,4 +244,7 @@ export const useLayerStore = create<LayerState>((set: any) => ({
                 l.id === layerId ? { ...l, thumbnail: thumbnailDataUrl } : l
             )
         })),
+
+    aiPromptDraft: null,
+    setAiPromptDraft: (prompt: string | null) => set({ aiPromptDraft: prompt }),
 }));

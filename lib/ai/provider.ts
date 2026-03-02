@@ -1,20 +1,59 @@
+export interface AIContext {
+    style: string;
+    lighting: string;
+    dominantColors: string[] | string;
+    artStyle?: string;
+    subjectMatter?: string;
+    [key: string]: any;
+}
+
+export interface AIConstraints {
+    regionBounds: { x: number; y: number; width: number; height: number };
+    featherAmount: number;
+    outputFormat: 'png' | 'jpeg' | 'webp';
+}
 
 export interface AIEditParams {
-    image: Buffer; // The full image or cropped region
-    mask: Buffer;  // The mask (white = edit, black = keep)
+    image: Buffer;
+    mask: Buffer;
     prompt: string;
+    finalPrompt?: string;
+    context?: AIContext;
+    constraints?: AIConstraints;
+    signal?: AbortSignal;
+}
+
+export interface AIEditResult {
+    buffer: Buffer;
+    seed?: number;
+    metadata?: {
+        modelUsed?: string;
+        generationTime?: number;
+        prompt?: string;
+    };
 }
 
 export interface AIProvider {
-    editImage(params: AIEditParams): Promise<Buffer>;
+    name: string;
+    editImage(params: AIEditParams): Promise<AIEditResult>;
 }
 
-export class MockAIProvider implements AIProvider {
-    async editImage(params: AIEditParams): Promise<Buffer> {
-        console.log("MockAIProvider: Processing image with prompt:", params.prompt);
-        // In a real mock, we might return a pre-generated image or just the original
-        // For now, we'll return the input image as-is to simulate a "no-op" edit
-        // or we could use Sharp here to draw a placeholder, but that's already in the route.
-        return params.image;
-    }
-}
+const providers: Map<string, AIProvider> = new Map();
+
+export const registerProvider = (provider: AIProvider) => {
+    providers.set(provider.name.toLowerCase(), provider);
+};
+
+export const getProvider = (name: string): AIProvider | undefined => {
+    return providers.get(name.toLowerCase());
+};
+
+export const getDefaultProvider = (): AIProvider => {
+    const gemini = providers.get('gemini');
+    if (gemini) return gemini;
+
+    // For now, if no actual providers are found, throw an error or return a mock.
+    const fallback = Array.from(providers.values())[0];
+    if (!fallback) throw new Error("No AI Providers Registered");
+    return fallback;
+};

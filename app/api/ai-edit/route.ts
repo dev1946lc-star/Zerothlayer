@@ -1,121 +1,213 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
+import { getDefaultProvider, getProvider } from '@/lib/ai';
 import sharp from 'sharp';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { PromptBuilder } from '@/lib/ai/prompts';
 
-// Placeholder for AI provider interface - will migrate to separate file later
-interface AIProvider {
-    editImage(imageBuffer: Buffer, maskBuffer: Buffer, prompt: string): Promise<Buffer>;
-}
+export const maxDuration = 60; // Max execution time for Vercel/Next.js
 
-export async function POST(req: NextRequest) {
+type OutputFormat = 'png' | 'jpeg' | 'webp';
+type RegionBounds = { x: number; y: number; width: number; height: number };
+
+const decodeBase64Image = (value: string, fieldName: string): Buffer => {
+    if (typeof value !== 'string' || value.length === 0) {
+        throw new Error(`Invalid ${fieldName}: expected base64 image string`);
+    }
+
+    const [, raw] = value.split(',');
+    const payload = raw ?? value;
+
     try {
-        const formData = await req.formData();
-        const imageFile = formData.get('image') as File;
-        const maskFile = formData.get('mask') as File;
-        const prompt = formData.get('prompt') as string;
-
-        if (!imageFile || !maskFile || !prompt) {
-            return NextResponse.json(
-                { error: 'Missing required fields: image, mask, or prompt' },
-                { status: 400 }
-            );
+        const buffer = Buffer.from(payload, 'base64');
+        if (!buffer.length) {
+            throw new Error('Decoded payload is empty');
         }
+        return buffer;
+    } catch {
+        throw new Error(`Invalid ${fieldName}: failed to decode base64`);
+    }
+};
 
-        // Convert files to buffers
-        const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
-        const maskBuffer = Buffer.from(await maskFile.arrayBuffer());
+const withTimeout = async <T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> => {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+            clearTimeout(timer);
+            reject(new Error(`AI provider timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
 
-        console.log(`Received request: ${prompt}`);
-        console.log(`Image size: ${imageBuffer.length}, Mask size: ${maskBuffer.length}`);
+    return Promise.race([fn(), timeoutPromise]);
+};
 
-        // Detect bounding box of the mask (the "selection" area)
-        // We use .trim() on the mask to remove the black/transparent background
-        // and get the info about the remaining (white) area.
-        const mask = sharp(maskBuffer);
-        const { data: trimmedMaskBuffer, info: trimInfo } = await mask
-            .trim({ threshold: 10 }) // Trim "boring" black pixels
-            .toBuffer({ resolveWithObject: true });
+const withRetry = async <T>(fn: (attempt: number) => Promise<T>, retries: number): Promise<T> => {
+    let lastError: unknown;
 
-        if (!trimInfo) {
-            return NextResponse.json(
-                { error: 'Could not detect selection in mask' },
-                { status: 400 }
-            );
-        }
-
-        const { x, y, width, height } = {
-            x: -trimInfo.trimOffsetLeft!, // trimOffsetLeft is negative of x
-            y: -trimInfo.trimOffsetTop!,  // trimOffsetTop is negative of y
-            width: trimInfo.width,
-            height: trimInfo.height
-        };
-
-        // Sanity check
-        if (!width || !height) {
-            console.warn("Trim failed to find bounding box");
-            // Return original image if we can't crop
-            return NextResponse.json({
-                image: `data:image/png;base64,${imageBuffer.toString('base64')}`
-            });
-        }
-
-        console.log(`Cropping to selection: x=${x}, y=${y}, w=${width}, h=${height}`);
-
-        // Crop the original image to this bounding box
-        const croppedImageBuffer = await sharp(imageBuffer)
-            .extract({ left: Math.abs(x), top: Math.abs(y), width, height })
-            .toBuffer();
-
-        // --- AI PROCESSING START ---
-        // TODO: Pass croppedImageBuffer + trimmedMaskBuffer to AIProvider
-        // For now, generate the overlay on the CROPPED area
-
-        // Create magenta overlay for the specific crop size
-        const overlay = await sharp({
-            create: {
-                width: width,
-                height: height,
-                channels: 4,
-                background: { r: 255, g: 0, b: 255, alpha: 0.5 }
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            return await fn(attempt);
+        } catch (error) {
+            lastError = error;
+            if (attempt < retries) {
+                await new Promise((resolve) => setTimeout(resolve, attempt * 300));
             }
-        })
+        }
+    }
+
+    throw lastError;
+};
+
+const clampRegionBounds = (bounds: RegionBounds, imageWidth: number, imageHeight: number): RegionBounds => {
+    const x = Math.max(0, Math.min(bounds.x, Math.max(0, imageWidth - 1)));
+    const y = Math.max(0, Math.min(bounds.y, Math.max(0, imageHeight - 1)));
+    const width = Math.max(1, Math.min(bounds.width, imageWidth - x));
+    const height = Math.max(1, Math.min(bounds.height, imageHeight - y));
+    return { x, y, width, height };
+};
+
+export async function POST(req: Request) {
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+
+    try {
+        const body = await req.json();
+        const { image, mask, prompt, metadata, providerName } = body;
+
+        if (!image || !mask || !prompt || typeof prompt !== 'string' || !prompt.trim()) {
+            return NextResponse.json({ error: 'Missing required fields (image, mask, prompt)' }, { status: 400 });
+        }
+
+        const imageBuffer = decodeBase64Image(image, 'image');
+        const maskBuffer = decodeBase64Image(mask, 'mask');
+
+        // Determine provider with fallback
+        let provider = providerName ? getProvider(providerName) : getDefaultProvider();
+        if (!provider) {
+            console.warn(`Provider ${providerName} not found, falling back to default.`);
+            provider = getDefaultProvider();
+        }
+
+        const imageMeta = await sharp(imageBuffer).metadata();
+        const imageWidth = Number(imageMeta.width ?? 0);
+        const imageHeight = Number(imageMeta.height ?? 0);
+        const width = Number(metadata?.regionBounds?.width ?? imageWidth);
+        const height = Number(metadata?.regionBounds?.height ?? imageHeight);
+        const outputFormat: OutputFormat = metadata?.outputFormat ?? 'png';
+        const featherAmount = Number(metadata?.featherAmount ?? 0);
+
+        if (!imageWidth || !imageHeight || !width || !height) {
+            return NextResponse.json({ error: 'Invalid image dimensions for AI edit request' }, { status: 400 });
+        }
+
+        const requestedBounds: RegionBounds = {
+            x: Number(metadata?.regionBounds?.x ?? 0),
+            y: Number(metadata?.regionBounds?.y ?? 0),
+            width,
+            height
+        };
+        const regionBounds = clampRegionBounds(requestedBounds, imageWidth, imageHeight);
+
+        const constraints = {
+            regionBounds,
+            featherAmount,
+            outputFormat
+        } as const;
+
+        const croppedImage = await sharp(imageBuffer)
+            .extract({
+                left: regionBounds.x,
+                top: regionBounds.y,
+                width: regionBounds.width,
+                height: regionBounds.height
+            })
             .png()
             .toBuffer();
 
-        // Composite overlay onto the cropped image, masking it with the trimmed mask
-        const processedCrop = await sharp(croppedImageBuffer)
-            .composite([
-                {
-                    input: await sharp(overlay)
-                        .composite([{ input: trimmedMaskBuffer, blend: 'dest-in' }]) // Mask the overlay
-                        .png()
-                        .toBuffer(),
-                    blend: 'over'
-                }
-            ])
-            .png()
-            .toBuffer();
-        // --- AI PROCESSING END ---
-
-        // Composite the processed crop back into the full original image
-        const finalImageBuffer = await sharp(imageBuffer)
-            .composite([{
-                input: processedCrop,
-                left: Math.abs(x),
-                top: Math.abs(y)
-            }])
+        const croppedMask = await sharp(maskBuffer)
+            .extract({
+                left: regionBounds.x,
+                top: regionBounds.y,
+                width: regionBounds.width,
+                height: regionBounds.height
+            })
+            .greyscale()
+            .threshold(16)
             .png()
             .toBuffer();
 
-        return NextResponse.json({
-            image: `data:image/png;base64,${finalImageBuffer.toString('base64')}`
+        const context = await PromptBuilder.extractContext(imageBuffer);
+        const finalPrompt = PromptBuilder.build(prompt.trim(), context, {
+            width: constraints.regionBounds.width,
+            height: constraints.regionBounds.height,
+            outputFormat: constraints.outputFormat,
+            featherAmount: constraints.featherAmount
         });
 
-    } catch (error) {
-        console.error('API Error:', error);
-        return NextResponse.json(
-            { error: 'Internal server error processing image' },
-            { status: 500 }
+        console.info('[AI-Edit] Request started', {
+            requestId,
+            provider: provider.name,
+            width: constraints.regionBounds.width,
+            height: constraints.regionBounds.height
+        });
+
+        const result = await withRetry(
+            async (attempt) =>
+                withTimeout(
+                    () =>
+                        provider.editImage({
+                            image: croppedImage,
+                            mask: croppedMask,
+                            prompt: prompt.trim(),
+                            finalPrompt,
+                            context: {
+                                style: context.artStyle,
+                                lighting: context.lighting,
+                                dominantColors: context.dominantColors
+                            },
+                            constraints
+                        }),
+                    30_000
+                ).catch((error) => {
+                    console.warn('[AI-Edit] Provider attempt failed', {
+                        requestId,
+                        provider: provider.name,
+                        attempt,
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                    throw error;
+                }),
+            2
         );
+
+        const maskedRegionBuffer = await sharp(result.buffer)
+            .resize(regionBounds.width, regionBounds.height, { fit: 'fill' })
+            .removeAlpha()
+            .joinChannel(croppedMask)
+            .png()
+            .toBuffer();
+
+        const outBase64 = `data:image/png;base64,${maskedRegionBuffer.toString('base64')}`;
+
+        console.info('[AI-Edit] Request finished', {
+            requestId,
+            provider: provider.name,
+            durationMs: Date.now() - startedAt
+        });
+
+        return NextResponse.json({
+            image: outBase64,
+            regionBounds,
+            seed: result.seed,
+            provider: provider.name,
+            context,
+            requestId,
+            metadata: {
+                ...(result.metadata || {}),
+                generationTime: Date.now() - startedAt,
+                prompt: finalPrompt
+            }
+        });
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Internal Server Error';
+        console.error('[AI-Edit API Error]', { requestId, error: message });
+        return NextResponse.json({ error: message, requestId }, { status: 500 });
     }
 }
